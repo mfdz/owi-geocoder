@@ -37,7 +37,7 @@ Die Stadt Stuttgart stellt die Daten im für die automatisierte Verarbeitung etw
 paste -d, \
     <( csvcut -c 1 -d ';' parkverstoesse_2020_.csv ) \
     <( csvcut -c 2 -d ';' parkverstoesse_2020_.csv | cut -c1-10 ) \
-    <( csvcut -c 3 -d ';' parkverstoesse_2020_.csv | cut -c12-19 | tail -n+2 | sed 's/^/Tatzeit\n/') \
+    <( csvcut -c 3 -d ';' parkverstoesse_2020_.csv | cut -c12-19 | tail -n+2 | sed '1 s/^/Tatzeit\n/') \
     <( csvcut -c 4- -d ';' parkverstoesse_2020_.csv ) | csvformat -D ',' > parkverstoesse_2020_cleaned.csv
 
 sed -i '' 's/\. Okt/.10/g' parkverstoesse_2020_cleaned.csv
@@ -64,5 +64,5 @@ sed -i '' 's/,Sep /,9./g' parkverstoesse_2020_cleaned.csv
 4. Daten nach Spalte tatort sortieren, so dass gleichnamige Straßen/Hausnummern direkt aufeinander folgen. Dies beschleuunigt die Geokodierung, da Geokodierungsergebnisse per least-recently-used cache gecached werden können.
 
 ```sh 
-csvsort -c tatort parkverstoesse_2020_cleaned.csv > parkverstoesse_2020_sorted.csv
+csvsort -c Tatort parkverstoesse_2020_cleaned.csv > parkverstoesse_2020_sorted.csv
 ```
