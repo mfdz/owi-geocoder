@@ -1,12 +1,14 @@
 # coding=utf-8
 import osmnx as ox
-
+import argparse
 import os, re, csv
 import pandas as pd 
 from functools import lru_cache
 from photon import Photon
 from datetime import datetime
 import sys
+import h3
+import holidays
 
 HNR_REGEX = re.compile("([- \.A-Za-zäÄüÜöÖß]+) hnr (\d+[A-Za-z-]*\d*)", re.UNICODE)
 HNR_WITHOUT_HNR_REGEX = re.compile("([- \.A-Za-zäÄüÜöÖß]+)(\d+[A-Za-z-]*\d*)", re.UNICODE)
@@ -18,7 +20,45 @@ class Step():
     def set_up(self):
         None
 
-class ParseStep(Step):
+class SimpleParseStep(Step):
+
+    def __init__(self, street_column, housenumber_column):
+        self.street_column = street_column
+        self.housenumber_column = housenumber_column
+
+    def normalize(self, input):
+        input = input.lower()
+        input = input.replace(',', ' ')
+        input = input.replace(' neben ', ' ')
+        input = input.replace(' höhe ', ' ')
+        input = input.replace(' flur: ', ' ')
+        input = input.replace(' flurstücksnummer: ', ' ')
+        input = input.replace(' gemarkung ', ' ')
+        input = input.replace(' bereich vz 283', ' ')
+        input = input.replace('hausnummer', 'hnr')
+        input = input.replace('str.', 'straße ')
+        input = input.replace(' gegenüber ', ' ') # information is already extracted
+        input = input.replace(' gg ', ' ') # information is already extracted
+        input = input.replace('geg.', ' ') # information is already extracted
+        input = input.replace('ggü.', ' ') # information is already extracted
+        input = input.replace(' auf dem parkplatz', ' ') # information is already extracted
+        input = input.replace(' parkplatz', ' ') # information is already extracted
+        input = input.replace(' parkhaus', ' ') # information is already extracted
+        input = input.replace(' (ca) ', ' ')
+        input = input.replace(' hnr ', ' ')
+        input = input.replace(' psa ', ' ')
+        input = input.replace(' parkscheinautomat ', ' ')
+
+        return input
+
+    def process(self, row):
+        row['type'] = 'hnr'
+        row['street'] = row[self.street_column]
+        row['hnr'] = row[self.housenumber_column]
+
+        return row
+
+class ParseStep(SimpleParseStep):
 
     def __init__(self, place_column_name):
         self.place_col = place_column_name
@@ -47,30 +87,6 @@ class ParseStep(Step):
             street = input
 
         return street.strip()
-
-    def normalize(self, input):
-        input = input.replace(',', ' ')
-        input = input.replace(' neben ', ' ')
-        input = input.replace(' höhe ', ' ')
-        input = input.replace(' flur: ', ' ')
-        input = input.replace(' flurstücksnummer: ', ' ')
-        input = input.replace(' gemarkung ', ' ')
-        input = input.replace(' bereich vz 283', ' ')
-        input = input.replace('hausnummer', 'hnr')
-        input = input.replace('str.', 'straße ')
-        input = input.replace(' gegenüber ', ' ') # information is already extracted
-        input = input.replace(' gg ', ' ') # information is already extracted
-        input = input.replace('geg.', ' ') # information is already extracted
-        input = input.replace('ggü.', ' ') # information is already extracted
-        input = input.replace(' auf dem parkplatz', ' ') # information is already extracted
-        input = input.replace(' parkplatz', ' ') # information is already extracted
-        input = input.replace(' parkhaus', ' ') # information is already extracted
-        input = input.replace(' (ca) ', ' ')
-        input = input.replace(' hnr ', ' ')
-        input = input.replace(' psa ', ' ')
-        input = input.replace(' parkscheinautomat ', ' ')
-
-        return input
 
     def process(self, row):
         input = row[self.place_col].lower()
@@ -146,7 +162,8 @@ class GeocodeAddressStep(Step):
         return self.geolocator.geocode(address, exactly_one=True, bbox=self.bbox)
 
     def call_geocoder(self, address, fallback_address = None):
-        loc = self.geocode_address(address+ self.address_append)
+        print(address+ ' '+self.address_append)
+        loc = self.geocode_address(address+ ' '+ self.address_append)
         return loc if loc or not fallback_address else self.geocode_address(fallback_address + self.address_append)
 
     def geocode(self, result):
@@ -186,6 +203,43 @@ class GeocodeAddressStep(Step):
         
         return row
 
+class AddH3CodeStep(Step):
+    def __init__(self, resolution : int = 8):
+        self.resolution = resolution
+        self.column_name = 'h3_{}'.format(resolution)
+
+    def process(self, row):
+        if row and row['lat'] and row['lon']:
+            row[self.column_name] = h3.geo_to_h3(float(row['lat']), float(row['lon']), self.resolution)
+        return row
+
+class TimeSlotStep(Step):
+    """
+        Adds the following columns:
+        - weekday
+        - weekday_cat: 
+        - hour:
+        - day_of_year:
+    """
+    def __init__(self, date_column: str, hour_column: str, country: str, subdiv: str = None):
+        self.holidays = holidays.country_holidays(country, subdiv=subdiv)
+        self.date_column = date_column
+        self.hour_column = hour_column
+        
+    def process(self, row):
+        timetuple = datetime.strptime(row[self.date_column], '%Y-%m-%d').timetuple()
+        row['weekday'] = timetuple.tm_wday
+        if timetuple.tm_wday == 6 or row[self.date_column] in self.holidays:
+            row['weekday_cat'] = 6
+        elif timetuple.tm_wday == 5:
+            row['weekday_cat'] = 5
+        else:
+            row['weekday_cat'] = 0
+        row['day_of_year'] = timetuple.tm_yday
+        row['hour'] = row[self.hour_column].split(':')[0]
+        
+        return row
+    
 class PrintStep(Step):
    
     def process(self, row):
@@ -195,13 +249,13 @@ class PrintStep(Step):
 class WriteCsvStep():
     i = 0
 
-    def __init__(self, filename):
+    def __init__(self, filename, fieldnames):
         self.filename = filename
+        self.fieldnames = fieldnames
 
     def set_up(self):
         self.outfile = open(self.filename, "w")
-        fieldnames = ['faz','tattag','tatzeit','tatort','tbnr1','summesoll','summeist','status','rechtsgebiet','type', 'street', 'hnr', 'street2', 'is_opposite', 'input_normalized', 'lat', 'lon', 'geocoded_postcode','geocoded_city','geocoded_street','geocoded_hnr','geocoded_name','geocoded_district','error']
-        self.writer = csv.DictWriter(self.outfile, fieldnames, restval='', delimiter=',', quotechar='"', extrasaction='ignore')
+        self.writer = csv.DictWriter(self.outfile, self.fieldnames, restval='', delimiter=',', quotechar='"', extrasaction='ignore')
         self.writer.writeheader()
 
     def process(self, row):
@@ -222,30 +276,53 @@ def process_rows(steps, rows):
             except Exception as e:
                 row['error'] = sys.exc_info()[0]
                 print("Unexpected error:", e)
+                import traceback
+                print(traceback.format_exc())
+                raise e
 
-if __name__ == '__main__':
+def main(address_column, osm_region_name, out_filename, input_filename, geocoder_url):
     print("{}: started".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     steps = [
-        ParseStep('tatort'),
-        GeocodePsaStep('Stuttgart, Deutschland'),
+        ParseStep(address_column),
+        GeocodePsaStep(osm_region_name),
         GeocodeAddressStep(
-            Photon(user_agent="owi-geocoder", domain=os.environ['GEOCODER_DOMAIN']),
+            Photon(user_agent="owi-geocoder", domain=geocoder_url),
             ["48.68,8.96","48.87,9.4"],
             force = False,
-            address_append = " Stuttgart"
+            address_append = osm_region_name
             ),
-        # PrintStep(),
-        WriteCsvStep("out/parkverstoesse_2020_geocoded.csv")
-    ]
+        TimeSlotStep('Tattag','Tatzeit', 'DE', 'BW'),
+        AddH3CodeStep(8),
+        AddH3CodeStep(9),
+        WriteCsvStep(out_filename, ['FAZ','Tattag','Tatzeit','Tatort','TBNR1','SummeSoll','SummeIst','Status','Rechtsgebiet','type', 'street', 'hnr', 'street2', 'is_opposite', 'input_normalized', 'lat', 'lon', 'geocoded_postcode','geocoded_city','geocoded_street','geocoded_hnr','geocoded_name','geocoded_district','error',
+            'h3_8', 'h3_9', 'weekday', 'weekday_cat', 'hour', 'day_of_year'])
+    ]        
 
-    with open("data/parkverstoesse_2020_sorted.csv") as csvfile:
+    # Köln
+    # steps= [
+    #    SimpleParseStep(),
+    #    GeocodeAddressStep(
+    #        Photon(user_agent="owi-geocoder", domain=geocoder_url),
+    #        ["50.8079,6.7865","51.0873,7.2245"],
+    #        force = False,
+    #        address_append = osm_region_name
+    #        ),
+    #    WriteCsvStep(out_filename, ['datum_von','Kennzeichen1','fahrzeugart','fabrikat','strasse','hausnummer','tatbestand1','tatbestand2','tatbestand3', 'lat', 'lon', 'geocoded_postcode','geocoded_city','geocoded_street','geocoded_hnr','geocoded_name','geocoded_district','error'])
+    #]
+
+    with open(input_filename) as csvfile:
         locations_reader = csv.DictReader(csvfile, delimiter=',', quotechar='"')
         process_rows(steps, locations_reader)
-        #rows = [
-        #   {'type': 'psa', 'tatort': 'astr neben psa 133'},
-        #   {'type': 'psa', 'tatort': 'schönbuchstr neben psa 9876'},
-        #    { 'tatort': 'ALEXANDERSTRAßE HNR Psa 1238'},
-        #    { 'tatort': 'ALEXANDERSTRAßE HNR Psa 1508'}
-        #]
-        #process_rows(steps, rows)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-a', dest='address_column', default='Tatort')
+    parser.add_argument('-r', dest='osm_region_name', default='Stuttgart, Deutschland')
+    parser.add_argument('-o', dest='out_filename', default='out/parkverstoesse_2020_geocoded.csv')
+    parser.add_argument('-i', dest='input_filename', default='data/parkverstoesse_2020_sorted.csv')
+    parser.add_argument('-g', dest='geocoder_url', default='photon.stadtnavi.eu')
+    
+    args = parser.parse_args()
+    main(args.address_column, args.osm_region_name, args.out_filename, args.input_filename, args.geocoder_url)
+
 

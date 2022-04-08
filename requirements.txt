@@ -1,3 +1,5 @@
 geopy
 osmnx
 scikit-learn
+h3
+holidays
